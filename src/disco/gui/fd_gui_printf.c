@@ -1099,8 +1099,6 @@ void
 fd_gui_printf_live_program_cache( fd_gui_t * gui ) {
   fd_topo_t const * topo = gui->topo;
 
-  ulong hits            = 0UL;
-  ulong lookups         = 0UL;
   ulong insertions      = 0UL;
   ulong insertion_bytes = 0UL;
   ulong evictions       = 0UL;
@@ -1112,8 +1110,6 @@ fd_gui_printf_live_program_cache( fd_gui_t * gui ) {
     fd_topo_tile_t const * execrp = &topo->tiles[ fd_topo_find_tile( topo, "execrp", i ) ];
     volatile ulong const * metrics = fd_metrics_tile( execrp->metrics );
 
-    hits            += metrics[ MIDX( COUNTER, EXECRP, PROGCACHE_HITS           ) ];
-    lookups         += metrics[ MIDX( COUNTER, EXECRP, PROGCACHE_LOOKUPS        ) ];
     insertions      += metrics[ MIDX( COUNTER, EXECRP, PROGCACHE_FILLS          ) ];
     insertion_bytes += metrics[ MIDX( COUNTER, EXECRP, PROGCACHE_FILL_BYTES     ) ];
     evictions       += metrics[ MIDX( COUNTER, EXECRP, PROGCACHE_EVICTIONS      ) ];
@@ -1133,8 +1129,8 @@ fd_gui_printf_live_program_cache( fd_gui_t * gui ) {
 
   jsonp_open_envelope( gui->http, "summary", "live_program_cache" );
     jsonp_open_object( gui->http, "value" );
-      jsonp_ulong( gui->http, "hits",            hits            );
-      jsonp_ulong( gui->http, "lookups",         lookups         );
+      jsonp_ulong( gui->http, "hits",            gui->summary.progcache_hits_1min    );
+      jsonp_ulong( gui->http, "lookups",         gui->summary.progcache_lookups_1min );
       jsonp_ulong( gui->http, "insertions",      insertions      );
       jsonp_ulong( gui->http, "insertion_bytes", insertion_bytes );
       jsonp_ulong( gui->http, "evictions",       evictions       );
@@ -1411,9 +1407,9 @@ fd_gui_peers_printf_node_all( fd_gui_peers_ctx_t *  peers ) {
     jsonp_open_object( peers->http, "value" );
       jsonp_open_array( peers->http, "add" );
         /* We can iter through the bandwidth tracking table since it will always be populated */
-        for( fd_gui_peers_bandwidth_tracking_fwd_iter_t iter = fd_gui_peers_bandwidth_tracking_fwd_iter_init( peers->bw_tracking, &FD_GUI_PEERS_BW_TRACKING_INGRESS_SORT_KEY, peers->contact_info_table ), j = 0UL;
+        for( fd_gui_peers_bandwidth_tracking_fwd_iter_t iter = fd_gui_peers_bandwidth_tracking_fwd_iter_init( peers->bw_tracking, &FD_GUI_PEERS_BW_TRACKING_INGRESS_SORT_KEY, peers->contact_info_table );
              !fd_gui_peers_bandwidth_tracking_fwd_iter_done( iter );
-             iter = fd_gui_peers_bandwidth_tracking_fwd_iter_next( iter, peers->contact_info_table ), j++ ) {
+             iter = fd_gui_peers_bandwidth_tracking_fwd_iter_next( iter, peers->contact_info_table ) ) {
           ulong contact_info_table_idx = fd_gui_peers_bandwidth_tracking_fwd_iter_idx( iter );
           peers_printf_node( peers, contact_info_table_idx );
         }
@@ -2342,7 +2338,11 @@ fd_gui_printf_peers_viewport_update( fd_gui_peers_ctx_t *  peers,
             jsonp_open_object( peers->http, NULL );
               jsonp_ulong ( peers->http, "row_index", j );
               jsonp_string( peers->http, "column_name", "Country" );
-              jsonp_string( peers->http, "new_value", peers->dbip.country_code[ cur->country_code_idx ] );
+              if( FD_LIKELY( cur->country_code_idx!=UCHAR_MAX ) ) {
+                jsonp_string( peers->http, "new_value", peers->dbip.country_code[ cur->country_code_idx ] );
+              } else {
+                jsonp_null( peers->http, "new_value" );
+              }
             jsonp_close_object( peers->http );
           }
 
@@ -2446,7 +2446,11 @@ fd_gui_printf_peers_viewport_request( fd_gui_peers_ctx_t *  peers,
           fd_base58_encode_32( cur->pubkey.uc, NULL, pubkey_base58 );
           jsonp_string( peers->http, "Pubkey", pubkey_base58 );
           jsonp_string( peers->http, "Name", cur->name );
-          jsonp_string( peers->http, "Country", peers->dbip.country_code[ cur->country_code_idx ] );
+          if( FD_LIKELY( cur->country_code_idx!=UCHAR_MAX ) ) {
+            jsonp_string( peers->http, "Country", peers->dbip.country_code[ cur->country_code_idx ] );
+          } else {
+            jsonp_null( peers->http, "Country" );
+          }
 
           uint ip4 = cur->contact_info.sockets[ FD_GOSSIP_CONTACT_INFO_SOCKET_GOSSIP ].is_ipv6 ? 0U : cur->contact_info.sockets[ FD_GOSSIP_CONTACT_INFO_SOCKET_GOSSIP ].ip4;
           char peer_addr[ 16 ]; /* 255.255.255.255 + '\0' */
@@ -2610,7 +2614,7 @@ fd_gui_printf_shreds_history( fd_gui_t * gui, ulong _slot ) {
   FD_TEST( slot );
   ulong end_offset = slot->shreds.end_offset;
   ulong start_offset = slot->shreds.start_offset;
-  FD_TEST( slot->shreds.end_offset > gui->shreds.history_tail-FD_GUI_SHREDS_HISTORY_SZ );
+  FD_TEST( slot->shreds.end_offset + FD_GUI_SHREDS_HISTORY_SZ > gui->shreds.history_tail );
 
   long min_ts = LONG_MAX;
   for( ulong i=start_offset; i<end_offset; i++ ) {

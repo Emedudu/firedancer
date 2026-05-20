@@ -150,6 +150,10 @@ struct fd_runtime {
 
     struct {
       fd_vote_state_versioned_t vote_state;
+    } update_commission_bps;
+
+    struct {
+      fd_vote_state_versioned_t vote_state;
     } withdraw;
 
     struct {
@@ -204,6 +208,7 @@ struct fd_runtime {
 
   struct {
     int enabled;
+    int reclaim_accounts;
   } fuzz;
 };
 typedef struct fd_runtime fd_runtime_t;

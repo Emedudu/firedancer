@@ -15,7 +15,10 @@
 #include "../../flamenco/progcache/fd_progcache_user.h"
 #include "../../flamenco/log_collector/fd_log_collector_base.h"
 #include "../../disco/metrics/fd_metrics.h"
+#include "../../util/sandbox/fd_pkeys.h"
+#include "../../util/sandbox/fd_sandbox.h"
 #include <time.h>
+#include <errno.h>
 #include "generated/fd_execrp_tile_seccomp.h"
 
 /* The exec tile is responsible for executing single transactions. The
@@ -35,7 +38,9 @@ typedef struct link_ctx {
 } link_ctx_t;
 
 struct fd_execrp_tile {
-  ulong                 tile_idx;
+  ulong tile_idx;
+
+  int funk_pkey; /* memory protection key, -1 if unsupported */
 
   /* link-related data structures. */
   link_ctx_t            replay_in[ 1 ];
@@ -195,6 +200,23 @@ publish_txn_finalized_msg( fd_execrp_tile_t *  ctx,
   ctx->execrp_replay_out->chunk = fd_dcache_compact_next( ctx->execrp_replay_out->chunk, sizeof(*msg), ctx->execrp_replay_out->chunk0, ctx->execrp_replay_out->wmark );
 }
 
+/* funk_mprotect makes the funk wksp read-only / writable
+   (cheaply, using userland protection keys) */
+
+static inline void
+funk_mprotect( fd_execrp_tile_t * ctx,
+               int                writable ) {
+  (void)ctx; (void)writable;
+#if defined(__linux__) && defined(__x86_64__)
+  if( FD_LIKELY( ctx->funk_pkey>=0 ) ) {
+    fd_x86_pkey_update( ctx->funk_pkey, 0, !writable );
+  }
+#endif
+}
+
+static inline void funk_mprotect_readonly( fd_execrp_tile_t * ctx ) { funk_mprotect( ctx, 0 ); }
+static inline void funk_mprotect_writable( fd_execrp_tile_t * ctx ) { funk_mprotect( ctx, 1 ); }
+
 static inline int
 returnable_frag( fd_execrp_tile_t *  ctx,
                  ulong               in_idx,
@@ -231,7 +253,9 @@ returnable_frag( fd_execrp_tile_t *  ctx,
         ctx->metrics.txn_result[ fd_execle_err_from_runtime_err( ctx->txn_out.err.txn_err ) ]++;
 
         if( FD_LIKELY( ctx->txn_out.err.is_committable ) ) {
+          funk_mprotect_writable( ctx );
           fd_runtime_commit_txn( ctx->runtime, ctx->bank, &ctx->txn_out );
+          funk_mprotect_readonly( ctx );
         } else {
           fd_runtime_cancel_txn( ctx->runtime, &ctx->txn_out );
         }
@@ -305,6 +329,42 @@ returnable_frag( fd_execrp_tile_t *  ctx,
 extern FD_TL int fd_wksp_oom_silent;
 
 static void
+privileged_init( fd_topo_t *      topo,
+                 fd_topo_tile_t * tile ) {
+  fd_execrp_tile_t * ctx = fd_topo_obj_laddr( topo, tile->tile_obj_id );
+  ctx->funk_pkey = -1;
+
+  ulong funk_obj_id = fd_pod_query_ulong( topo->props, "funk", ULONG_MAX );
+  FD_TEST( funk_obj_id!=ULONG_MAX );
+  fd_wksp_t * funk_wksp = fd_wksp_containing( fd_topo_obj_laddr( topo, funk_obj_id ) );
+  FD_TEST( funk_wksp );
+
+#if defined(__linux__) && defined(__x86_64__)
+  if( FD_UNLIKELY( fd_sandbox_getpid()!=fd_sandbox_gettid() ) ) {
+    FD_LOG_INFO(( "userland memory protection disabled: not compatible with single-process mode" ));
+    return;
+  }
+
+  int pkey = fd_syscall_pkey_alloc( 0, 0 );
+  if( FD_UNLIKELY( pkey<0 ) ) {
+    FD_LOG_INFO(( "userland memory protection disabled: pkey_alloc(0,0) failed (%i-%s)",
+                  errno, fd_io_strerror( errno ) ));
+    return;
+  }
+
+  int err = fd_wksp_pkey_install( funk_wksp, pkey );
+  if( FD_UNLIKELY( err ) ) {
+    FD_LOG_ERR(( "error while setting up userland memory protection: fd_wksp_pkey_install(funk_wksp,pkey=%d) failed (%i-%s)",
+                 pkey, err, fd_io_strerror( err ) ));
+  }
+
+  ctx->funk_pkey = pkey;
+  funk_mprotect_readonly( ctx );
+  FD_LOG_INFO(( "userland memory protection enabled (pkey=%d)", pkey ));
+# endif /* defined(__linux__) && defined(__x86_64__) */
+}
+
+static void
 unprivileged_init( fd_topo_t *      topo,
                    fd_topo_tile_t * tile ) {
   void * scratch = fd_topo_obj_laddr( topo, tile->tile_obj_id );
@@ -319,14 +379,9 @@ unprivileged_init( fd_topo_t *      topo,
   }
   void * _txncache          = FD_SCRATCH_ALLOC_APPEND( l, fd_txncache_align(),        fd_txncache_footprint( tile->execrp.max_live_slots ) );
   uchar * pc_scratch        = FD_SCRATCH_ALLOC_APPEND( l, FD_PROGCACHE_SCRATCH_ALIGN, FD_PROGCACHE_SCRATCH_FOOTPRINT );
-  ulong  scratch_alloc_mem  = FD_SCRATCH_ALLOC_FINI( l, scratch_align() );
-
-  if( FD_UNLIKELY( scratch_alloc_mem - (ulong)scratch  - scratch_footprint( tile ) ) ) {
-    FD_LOG_ERR( ( "Scratch_alloc_mem did not match scratch_footprint diff: %lu alloc: %lu footprint: %lu",
-      scratch_alloc_mem - (ulong)scratch - scratch_footprint( tile ),
-      scratch_alloc_mem,
-      (ulong)scratch + scratch_footprint( tile ) ) );
-  }
+  ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, scratch_align() );
+  if( FD_UNLIKELY( scratch_top > (ulong)scratch + scratch_footprint( tile ) ) )
+    FD_LOG_ERR(( "scratch overflow %lu %lu %lu", scratch_top - (ulong)scratch - scratch_footprint( tile ), scratch_top, (ulong)scratch + scratch_footprint( tile ) ));
 
   for( ulong i=0UL; i<FD_TXN_ACTUAL_SIG_MAX; i++ ) {
     fd_sha512_t * sha = fd_sha512_join( fd_sha512_new( ctx->sha_mem+i ) );
@@ -372,7 +427,7 @@ unprivileged_init( fd_topo_t *      topo,
     FD_LOG_ERR(( "Failed to join banks" ));
   }
 
-  fd_accdb_init_from_topo( ctx->accdb, topo, tile, tile->execrp.accdb_max_depth );
+  fd_accdb_init_from_topo( ctx->accdb, topo, tile->execrp.accdb_max_depth );
 
   fd_progcache_init_from_topo( ctx->progcache, topo, pc_scratch, FD_PROGCACHE_SCRATCH_FOOTPRINT );
 
@@ -484,6 +539,7 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->runtime->log.dump_proto_ctx       = ctx->dump_proto_ctx;
   ctx->runtime->log.txn_dump_ctx         = ctx->txn_dump_ctx;
   ctx->runtime->fuzz.enabled             = 0;
+  ctx->runtime->fuzz.reclaim_accounts    = 0;
   ctx->runtime->accounts.executable_cnt  = 0UL;
 
   memset( &ctx->metrics,          0, sizeof(ctx->metrics)          );
@@ -540,6 +596,7 @@ fd_topo_run_tile_t fd_tile_execrp = {
   .populate_allowed_fds     = populate_allowed_fds,
   .scratch_align            = scratch_align,
   .scratch_footprint        = scratch_footprint,
+  .privileged_init          = privileged_init,
   .unprivileged_init        = unprivileged_init,
   .run                      = stem_run,
 };

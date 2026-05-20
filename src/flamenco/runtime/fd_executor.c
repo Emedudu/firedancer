@@ -13,10 +13,8 @@
 #include "program/fd_vote_program.h"
 #include "program/fd_zk_elgamal_proof_program.h"
 #include "sysvar/fd_sysvar_cache.h"
-#include "sysvar/fd_sysvar_epoch_schedule.h"
 #include "sysvar/fd_sysvar_instructions.h"
 #include "sysvar/fd_sysvar_rent.h"
-#include "sysvar/fd_sysvar_slot_history.h"
 #include "tests/fd_dump_pb.h"
 
 #include "../accdb/fd_accdb_sync.h"
@@ -792,7 +790,7 @@ fd_executor_create_rollback_fee_payer_account( fd_runtime_t *      runtime,
       fd_memcpy( fee_payer_data, (uchar *)meta, sizeof(fd_account_meta_t) + meta->dlen );
     } else {
       /* Copy from account database */
-      fd_funk_txn_xid_t xid = { .ul = { bank->f.slot, bank->idx } };
+      fd_funk_txn_xid_t xid = fd_bank_xid( bank );
       fd_accdb_ro_t fee_payer_ro[1];
       if( FD_UNLIKELY( !fd_accdb_open_ro( runtime->accdb, fee_payer_ro, &xid, fee_payer_key ) ) ) {
         FD_BASE58_ENCODE_32_BYTES( fee_payer_key->uc, fee_payer_key_b58 );
@@ -882,12 +880,12 @@ fd_executor_setup_txn_alut_account_keys( fd_runtime_t *      runtime,
   if( TXN( txn_in->txn )->transaction_version == FD_TXN_V0 ) {
     /* https://github.com/anza-xyz/agave/blob/368ea563c423b0a85cc317891187e15c9a321521/runtime/src/bank/address_lookup_table.rs#L44-L48 */
     fd_sysvar_cache_t const * sysvar_cache = &bank->f.sysvar_cache;
-    fd_slot_hash_t const * slot_hashes = fd_sysvar_cache_slot_hashes_join_const( sysvar_cache );
-    if( FD_UNLIKELY( !slot_hashes ) ) {
+    fd_slot_hashes_t slot_hashes_view[1];
+    if( FD_UNLIKELY( !fd_sysvar_cache_slot_hashes_view( sysvar_cache, slot_hashes_view ) ) ) {
       FD_LOG_DEBUG(( "fd_executor_setup_txn_alut_account_keys(): failed to get slot hashes" ));
       return FD_RUNTIME_TXN_ERR_ACCOUNT_NOT_FOUND;
     }
-    fd_funk_txn_xid_t xid       = { .ul = { bank->f.slot, bank->idx } };
+    fd_funk_txn_xid_t xid       = fd_bank_xid( bank );
     fd_acct_addr_t *  accts_alt = (fd_acct_addr_t *) fd_type_pun( &txn_out->accounts.keys[txn_out->accounts.cnt] );
     int err = fd_runtime_load_txn_address_lookup_tables( txn_in,
                                                          TXN( txn_in->txn ),
@@ -895,9 +893,8 @@ fd_executor_setup_txn_alut_account_keys( fd_runtime_t *      runtime,
                                                          runtime->accdb,
                                                          &xid,
                                                          bank->f.slot,
-                                                         slot_hashes,
+                                                         slot_hashes_view,
                                                          accts_alt );
-    fd_sysvar_cache_slot_hashes_leave_const( sysvar_cache, slot_hashes );
     txn_out->accounts.cnt += TXN( txn_in->txn )->addr_table_adtl_cnt;
     if( FD_UNLIKELY( err!=FD_RUNTIME_EXECUTE_SUCCESS ) ) return err;
 
@@ -1095,10 +1092,10 @@ fd_instr_stack_pop( fd_runtime_t *          runtime,
 /* This function mimics Agave's `.and(self.pop())` functionality,
    where we always pop the instruction stack no matter what the error code is.
    https://github.com/anza-xyz/agave/blob/v2.2.12/program-runtime/src/invoke_context.rs#L480 */
-static inline int
-fd_execute_instr_end( fd_exec_instr_ctx_t * instr_ctx,
-                      fd_instr_info_t *     instr,
-                      int                   instr_exec_result ) {
+int
+fd_execute_instr_end( fd_exec_instr_ctx_t *   instr_ctx,
+                      fd_instr_info_t const * instr,
+                      int                     instr_exec_result ) {
   int stack_pop_err = fd_instr_stack_pop( instr_ctx->runtime, instr_ctx->txn_out, instr );
 
   /* Only report the stack pop error on success */
@@ -1270,7 +1267,7 @@ fd_executor_setup_txn_account( fd_runtime_t *      runtime,
   }
 
   if( FD_LIKELY( !account ) ) {
-    fd_funk_txn_xid_t xid = { .ul = { bank->f.slot, bank->idx } };
+    fd_funk_txn_xid_t xid = fd_bank_xid( bank );
     account = (fd_accdb_rw_t *)fd_accdb_open_ro( runtime->accdb, ref_slot->ro, &xid, address );
     /* creates a database reference, which is explicitly dropped here
        or in commit/cancel */
@@ -1349,7 +1346,7 @@ fd_executor_setup_executable_account( fd_runtime_t *            runtime,
      will fail at the instruction execution level since the programdata
      account will not exist within the executable accounts list. */
   fd_pubkey_t *     programdata_acc = &program_loader_state->inner.program.programdata_address;
-  fd_funk_txn_xid_t xid             = { .ul = { bank->f.slot, bank->idx } };
+  fd_funk_txn_xid_t xid             = fd_bank_xid( bank );
 
   fd_accdb_ro_t * ro = &runtime->accounts.executable[ *executable_idx ];
 
@@ -1359,7 +1356,11 @@ fd_executor_setup_executable_account( fd_runtime_t *            runtime,
       fd_txn_out_t * prev_txn_out = txn_in->bundle.prev_txn_outs[ i-1 ];
       for( ushort j=0; j<prev_txn_out->accounts.cnt; j++ ) {
         if( fd_pubkey_eq( &prev_txn_out->accounts.keys[ j ], programdata_acc ) && prev_txn_out->accounts.is_writable[ j ] ) {
-          ro = fd_accdb_ro_init_nodb( ro, programdata_acc, prev_txn_out->accounts.account[ j ].meta );
+          /* If the most recent transaction shows the account closed,
+             return early so the loaded size is not increased. */
+          fd_account_meta_t * meta = prev_txn_out->accounts.account[ j ].meta;
+          if( FD_UNLIKELY( meta->lamports==0UL ) ) return;
+          ro = fd_accdb_ro_init_nodb( ro, programdata_acc, meta );
           is_found = 1;
           break;
         }
@@ -1504,7 +1505,7 @@ fd_executor_txn_check( fd_runtime_t * runtime,
     if     ( !memcmp( meta->owner, &fd_solana_stake_program_id, sizeof(fd_pubkey_t) ) ) txn_out->accounts.stake_update[i] = 1;
     else if( !memcmp( meta->owner, &fd_solana_vote_program_id,  sizeof(fd_pubkey_t) ) ) txn_out->accounts.vote_update[i] = 1;
 
-    if( FD_LIKELY( !runtime->fuzz.enabled ) ) {
+    if( FD_LIKELY( !runtime->fuzz.enabled || runtime->fuzz.reclaim_accounts ) ) {
       fd_executor_reclaim_account( meta, bank->f.slot );
     }
   }

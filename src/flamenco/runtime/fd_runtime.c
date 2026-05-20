@@ -121,8 +121,8 @@ fd_runtime_update_next_leaders( fd_bank_t *          bank,
     } else if( idx!=0UL && !fd_epoch_leaders_is_leader_idx( leaders, i-1UL ) ) {
       stake_weights[ idx-1UL ].stake += stake;
     } else {
-      stake_weights[ idx ].id_key   = (fd_pubkey_t){ .uc = FD_DUMMY_ACCOUNT };
-      stake_weights[ idx ].vote_key = (fd_pubkey_t){ .uc = FD_DUMMY_ACCOUNT };
+      stake_weights[ idx ].id_key   = (fd_pubkey_t){{0}};
+      stake_weights[ idx ].vote_key = (fd_pubkey_t){{0}};
       stake_weights[ idx ].stake    = stake;
       idx++;
     }
@@ -198,8 +198,8 @@ fd_runtime_update_leaders( fd_bank_t *          bank,
     } else if( idx!=0UL && !fd_epoch_leaders_is_leader_idx( leaders, i-1UL ) ) {
       stake_weights[ idx-1UL ].stake += stake;
     } else {
-      stake_weights[ idx ].id_key   = (fd_pubkey_t){ .uc = FD_DUMMY_ACCOUNT };
-      stake_weights[ idx ].vote_key = (fd_pubkey_t){ .uc = FD_DUMMY_ACCOUNT };
+      stake_weights[ idx ].id_key   = (fd_pubkey_t){{0}};
+      stake_weights[ idx ].vote_key = (fd_pubkey_t){{0}};
       stake_weights[ idx ].stake    = stake;
       idx++;
     }
@@ -303,11 +303,8 @@ fd_runtime_settle_fees( fd_bank_t *               bank,
   ulong fee_burn   = execution_fees / 2;
   ulong fee_reward = fd_ulong_sat_add( priority_fees, execution_fees - fee_burn );
 
-  /* Remove fee balance from bank (decreasing capitalization) */
-  if( FD_UNLIKELY( total_fees > bank->f.capitalization ) ) {
-    FD_LOG_EMERG(( "fee settlement would underflow capitalization (slot=%lu total_fees=%lu cap=%lu)",
-                   slot, total_fees, bank->f.capitalization ));
-  }
+  /* Remove fee balance from bank (decreasing capitalization).
+     Allow underflow (wrap) to match Agave's silent fetch_sub behavior. */
   bank->f.capitalization -= total_fees;
   bank->f.execution_fees  = 0;
   bank->f.priority_fees   = 0;
@@ -346,7 +343,7 @@ fd_runtime_freeze( fd_bank_t *         bank,
                    fd_accdb_user_t *   accdb,
                    fd_capture_ctx_t *  capture_ctx ) {
 
-  fd_funk_txn_xid_t const xid = { .ul = { bank->f.slot, bank->idx } };
+  fd_funk_txn_xid_t const xid = fd_bank_xid( bank );
 
   if( FD_LIKELY( bank->f.slot != 0UL ) ) {
     fd_sysvar_recent_hashes_update( bank, accdb, &xid, capture_ctx );
@@ -482,6 +479,8 @@ fd_feature_activate( fd_bank_t *               bank,
                      fd_feature_id_t const *   id,
                      fd_pubkey_t const *       addr ) {
   fd_features_t * features = &bank->f.features;
+
+  fd_features_set( features, id, FD_FEATURE_DISABLED );
 
   if( id->reverted==1 ) return;
 
@@ -744,7 +743,7 @@ fd_runtime_block_sysvar_update_pre_execute( fd_bank_t *               bank,
   if( bank->f.slot != 0 ) {
     fd_sysvar_slot_hashes_update( bank, accdb, xid, capture_ctx );
   }
-  fd_sysvar_last_restart_slot_update( bank, accdb, xid, capture_ctx, bank->f.last_restart_slot );
+  fd_sysvar_last_restart_slot_update( bank, accdb, xid, capture_ctx );
 }
 
 int
@@ -754,7 +753,7 @@ fd_runtime_load_txn_address_lookup_tables( fd_txn_in_t const *       txn_in,
                                            fd_accdb_user_t *         accdb,
                                            fd_funk_txn_xid_t const * xid,
                                            ulong                     slot,
-                                           fd_slot_hash_t const *    hashes, /* deque */
+                                           fd_slot_hashes_t const *  hashes,
                                            fd_acct_addr_t *          out_accts_alt ) {
 
   if( FD_LIKELY( txn->transaction_version!=FD_TXN_V0 ) ) return FD_RUNTIME_EXECUTE_SUCCESS;
@@ -857,7 +856,7 @@ fd_runtime_block_execute_prepare( fd_banks_t *         banks,
                                   fd_capture_ctx_t *   capture_ctx,
                                   int *                is_epoch_boundary ) {
 
-  fd_funk_txn_xid_t const xid = { .ul = { bank->f.slot, bank->idx } };
+  fd_funk_txn_xid_t const xid = fd_bank_xid( bank );
 
   fd_runtime_block_pre_execute_process_new_epoch( banks, bank, accdb, &xid, capture_ctx, runtime_stack, is_epoch_boundary );
 
@@ -1176,7 +1175,7 @@ fd_runtime_commit_txn( fd_runtime_t * runtime,
     }
   }
 
-  fd_funk_txn_xid_t xid = { .ul = { bank->f.slot, bank->idx } };
+  fd_funk_txn_xid_t xid = fd_bank_xid( bank );
 
   if( FD_UNLIKELY( txn_out->err.txn_err ) ) {
 
@@ -1246,11 +1245,12 @@ fd_runtime_commit_txn( fd_runtime_t * runtime,
       }
 
       if( txn_out->accounts.vote_update[i] ) {
-        if( FD_UNLIKELY( fd_accdb_ref_lamports( account->ro )==0UL || !fd_vsv_is_correct_size_owner_and_init( account->meta ) ) ) {
+        fd_vote_block_timestamp_t last_vote;
+        if( FD_UNLIKELY( fd_accdb_ref_lamports( account->ro )==0UL ||
+                         !fd_vsv_is_correct_size_owner_and_init( account->meta ) ||
+                         fd_vote_account_last_timestamp( fd_account_data( account->meta ), account->meta->dlen, &last_vote ) ) ) {
           fd_top_votes_invalidate( top_votes, pubkey );
         } else {
-          fd_vote_block_timestamp_t last_vote;
-          FD_TEST( !fd_vote_account_last_timestamp( fd_account_data( account->meta ), account->meta->dlen, &last_vote ) );
           fd_top_votes_update( top_votes, pubkey, last_vote.slot, last_vote.timestamp );
         }
       }
@@ -1659,17 +1659,24 @@ fd_runtime_init_bank_from_genesis( fd_banks_t *              banks,
 
   ulong new_rate_activation_epoch = 0UL;
 
-  fd_stake_history_t stake_history[1];
-  fd_sysvar_stake_history_read( accdb, xid, stake_history );
+  {
+    fd_stake_history_t   stake_history_[1];
+    fd_accdb_ro_t        ro_[1];
+    fd_stake_history_t * stake_history = NULL;
+    fd_accdb_ro_t *      ro = fd_accdb_open_ro( accdb, ro_, xid, &fd_sysvar_stake_history_id );
+    if( ro ) stake_history = fd_sysvar_stake_history_view( stake_history_, fd_accdb_ref_data_const( ro ), fd_accdb_ref_data_sz( ro ) );
 
-  fd_refresh_vote_accounts(
-      bank,
-      accdb,
-      xid,
-      runtime_stack,
-      stake_delegations,
-      stake_history,
-      &new_rate_activation_epoch );
+    fd_refresh_vote_accounts(
+        bank,
+        accdb,
+        xid,
+        runtime_stack,
+        stake_delegations,
+        stake_history,
+        &new_rate_activation_epoch );
+
+    if( FD_LIKELY( ro ) ) fd_accdb_close_ro( accdb, ro );
+  }
 
   fd_vote_stakes_t * vote_stakes = fd_bank_vote_stakes( bank );
   fd_vote_stakes_genesis_fini( vote_stakes );

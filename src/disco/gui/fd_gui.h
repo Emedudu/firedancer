@@ -16,7 +16,6 @@
 #include "../../choreo/tower/fd_tower.h"
 #include "../../choreo/tower/fd_tower_serdes.h"
 #include "../../flamenco/leaders/fd_leaders.h"
-#include "../../flamenco/types/fd_types_custom.h"
 #include "../../util/fd_util_base.h"
 #include "../../util/hist/fd_histf.h"
 #include "../../waltz/http/fd_http_server.h"
@@ -96,6 +95,8 @@ struct fd_gui_validator_info {
 
 #define FD_GUI_TPS_HISTORY_WINDOW_DURATION_SECONDS (10L)
 #define FD_GUI_TPS_HISTORY_SAMPLE_CNT              (150UL)
+
+#define FD_GUI_PROGCACHE_HISTORY_CNT               (600UL) /* 60s / 100ms */
 
 #define FD_GUI_TILE_TIMER_SNAP_CNT                   (512UL)
 #define FD_GUI_TILE_TIMER_LEADER_DOWNSAMPLE_CNT      (50UL)  /* 500ms / 10ms */
@@ -691,6 +692,12 @@ struct fd_gui {
     fd_gui_tile_stats_t tile_stats_reference[ 1 ];
     fd_gui_tile_stats_t tile_stats_current[ 1 ];
 
+    ulong progcache_history_idx;
+    ulong progcache_hits_history   [ FD_GUI_PROGCACHE_HISTORY_CNT ];
+    ulong progcache_lookups_history[ FD_GUI_PROGCACHE_HISTORY_CNT ];
+    ulong progcache_hits_1min;
+    ulong progcache_lookups_1min;
+
     ulong                  tile_timers_snap_idx;
     ulong                  tile_timers_snap_idx_slot_start;
     /* Temporary storage for samples.  Will be downsampled into
@@ -785,6 +792,23 @@ struct fd_gui {
 };
 
 typedef struct fd_gui fd_gui_t;
+
+/* fd_gui_staged_push returns a pointer to the next free staging slot
+   and advances staged_tail.  If the ring is full staged_head is
+   advanced first so the oldest entry is silently dropped. */
+static inline fd_gui_slot_staged_shred_event_t *
+fd_gui_staged_push( fd_gui_t * gui ) {
+  if( FD_UNLIKELY( gui->shreds.staged_tail - gui->shreds.staged_head >= FD_GUI_SHREDS_STAGING_SZ ) ) {
+    gui->shreds.staged_head = gui->shreds.staged_tail - FD_GUI_SHREDS_STAGING_SZ + 1UL;
+    if( FD_UNLIKELY( gui->shreds.staged_next_broadcast < gui->shreds.staged_head ) ) {
+      gui->shreds.staged_next_broadcast = gui->shreds.staged_head;
+    }
+  }
+  fd_gui_slot_staged_shred_event_t * dst =
+      &gui->shreds.staged[ gui->shreds.staged_tail % FD_GUI_SHREDS_STAGING_SZ ];
+  gui->shreds.staged_tail++;
+  return dst;
+}
 
 FD_PROTOTYPES_BEGIN
 

@@ -38,14 +38,17 @@ fd_accdb_search_chain( fd_funk_t const *          funk,
   fd_funk_rec_t * best = NULL;
   for( ulong i=0UL; i<cnt; i++ ) {
     fd_racesan_hook( "accdb_search_chain:walk_step" );
+    if( FD_UNLIKELY( ele_idx>=rec_max ) ) {
+      if( FD_UNLIKELY( atomic_load_explicit( ver_cnt_p, memory_order_acquire )!=ver_cnt ) ) {
+        return FD_MAP_ERR_AGAIN;
+      }
+      FD_LOG_CRIT(( "fd_accdb_search_chain detected memory corruption: invalid ele_idx at node %lu:%u (rec_max %lu)",
+                    chain_idx, ele_idx, rec_max ));
+    }
+
     uint ele_next = rec_tbl[ ele_idx ].map_next;
     if( FD_UNLIKELY( atomic_load_explicit( ver_cnt_p, memory_order_acquire )!=ver_cnt ) ) {
       return FD_MAP_ERR_AGAIN;
-    }
-
-    if( FD_UNLIKELY( ele_idx>=rec_max ) ) {
-      FD_LOG_CRIT(( "fd_accdb_search_chain detected memory corruption: invalid ele_idx at node %lu:%u (rec_max %lu)",
-                    chain_idx, ele_idx, rec_max ));
     }
 
     fd_funk_rec_t * rec = &rec_tbl[ ele_idx ];
@@ -108,6 +111,7 @@ fd_accdb_peek_funk( fd_accdb_user_v1_t *      accdb,
   ro->ref->user_data  = (ulong)rec;
   ro->ref->user_data2 = 0UL;
   ro->meta            = fd_funk_val( rec, funk->wksp );
+  fd_racesan_hook( "accdb_peek_funk:post_val" );
   return ro;
 }
 
@@ -380,7 +384,7 @@ fd_funk_t *
 fd_accdb_user_v1_funk( fd_accdb_user_t * accdb ) {
   fd_accdb_user_v1_t * v1 = (fd_accdb_user_v1_t *)accdb;
   uint accdb_type = accdb->base.accdb_type;
-  if( FD_UNLIKELY( accdb_type!=FD_ACCDB_TYPE_V1 && accdb_type!=FD_ACCDB_TYPE_V2 ) ) {
+  if( FD_UNLIKELY( accdb_type!=FD_ACCDB_TYPE_V1 ) ) {
     FD_LOG_CRIT(( "fd_accdb_user_v1_funk called on non-v1 accdb_user (type %u)", accdb->base.accdb_type ));
   }
   return v1->funk;

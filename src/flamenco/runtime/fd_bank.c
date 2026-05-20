@@ -1,6 +1,7 @@
 #include "fd_bank.h"
 #include "fd_runtime_const.h"
 #include "../rewards/fd_stake_rewards.h"
+#include "sysvar/fd_sysvar_cache.h"
 
 fd_lthash_value_t const *
 fd_bank_lthash_locking_query( fd_bank_t * bank ) {
@@ -655,7 +656,9 @@ fd_bank_apply_deltas( fd_banks_t * banks,
   /* We have populated all of the indicies that we need to apply deltas
      from in reverse order. */
 
-  fd_stake_history_t const * stake_history = fd_sysvar_cache_stake_history_join_const( &bank->f.sysvar_cache );
+  fd_stake_history_t stake_history_[1];
+  fd_stake_history_t const * stake_history = fd_sysvar_cache_stake_history_view( &bank->f.sysvar_cache, stake_history_ );
+  /* stake_history may be NULL */
   for( ulong i=pool_indices_len; i>0; i-- ) {
     ushort sd_idx = sd_pool_indices[i-1UL];
     ushort nv_idx = nv_pool_indices[i-1UL];
@@ -682,7 +685,8 @@ fd_bank_stake_delegation_mark_deltas( fd_banks_t *             banks,
     curr_bank = fd_banks_pool_ele( bank_pool, curr_bank->parent_idx );
   }
 
-  fd_stake_history_t const * stake_history = fd_sysvar_cache_stake_history_join_const( &bank->f.sysvar_cache );
+  fd_stake_history_t stake_history[1];
+  fd_sysvar_cache_stake_history_view( &bank->f.sysvar_cache, stake_history );
 
   for( ulong i=pool_indices_len; i>0; i-- ) {
     ushort idx = pool_indices[i-1UL];
@@ -708,7 +712,8 @@ fd_bank_stake_delegation_unmark_deltas( fd_banks_t *             banks,
     curr_bank = fd_banks_pool_ele( bank_pool, curr_bank->parent_idx );
   }
 
-  fd_stake_history_t const * stake_history = fd_sysvar_cache_stake_history_join_const( &bank->f.sysvar_cache );
+  fd_stake_history_t stake_history_[1];
+  fd_stake_history_t * stake_history = fd_sysvar_cache_stake_history_view( &bank->f.sysvar_cache, stake_history_ );
 
   for( ulong i=pool_indices_len; i>0; i-- ) {
     ushort idx = pool_indices[i-1UL];
@@ -987,29 +992,41 @@ fd_banks_new_bank( fd_banks_t * banks,
 
 /* Mark everything in the fork tree starting at the given bank dead. */
 
-static void
+static ulong
 fd_banks_subtree_mark_dead( fd_banks_t * banks,
                             fd_bank_t *  bank_pool,
-                            fd_bank_t *  bank ) {
+                            fd_bank_t *  bank,
+                            ulong *      opt_idxs ) {
   if( FD_UNLIKELY( !bank ) ) FD_LOG_CRIT(( "invariant violation: bank is NULL" ));
 
+  ulong idxs_cnt = 0UL;
   bank->state = FD_BANK_STATE_DEAD;
   fd_banks_dead_push_head( fd_banks_get_dead_banks_deque( banks ), (fd_bank_idx_seq_t){ .idx = bank->idx, .seq = bank->bank_seq } );
+  if( opt_idxs ) opt_idxs[ idxs_cnt ] = bank->idx;
+  idxs_cnt++;
 
   /* Recursively mark all children as dead. */
   ulong child_idx = bank->child_idx;
   while( child_idx!=fd_banks_pool_idx_null( bank_pool ) ) {
-    fd_bank_t * child = fd_banks_pool_ele( bank_pool, child_idx );
-    fd_banks_subtree_mark_dead( banks, bank_pool, child );
+    fd_bank_t * child      = fd_banks_pool_ele( bank_pool, child_idx );
+    ulong *     child_idxs = opt_idxs ? opt_idxs+idxs_cnt : NULL;
+    idxs_cnt += fd_banks_subtree_mark_dead( banks, bank_pool, child, child_idxs );
     child_idx = child->sibling_idx;
   }
+
+  return idxs_cnt;
 }
 
 void
 fd_banks_mark_bank_dead( fd_banks_t * banks,
-                         ulong        bank_idx ) {
-  fd_bank_t * bank = fd_banks_pool_ele( fd_banks_get_bank_pool( banks ), bank_idx );
-  fd_banks_subtree_mark_dead( banks, fd_banks_get_bank_pool( banks ), bank );
+                         ulong        bank_idx,
+                         ulong *      opt_idxs,
+                         ulong *      opt_idxs_cnt ) {
+  fd_bank_t * bank_pool = fd_banks_get_bank_pool( banks );
+  fd_bank_t * bank      = fd_banks_pool_ele( bank_pool, bank_idx );
+
+  ulong idxs_cnt = fd_banks_subtree_mark_dead( banks, bank_pool, bank, opt_idxs );
+  if( opt_idxs_cnt ) *opt_idxs_cnt = idxs_cnt;
 }
 
 int
@@ -1079,6 +1096,7 @@ fd_banks_prune_one_dead_bank( fd_banks_t *                   banks,
     if( FD_LIKELY( started_replaying ) ) {
       cancel->txncache_fork_id = bank->txncache_fork_id;
       cancel->slot             = bank->f.slot;
+      cancel->bank_seq         = bank->bank_seq;
       cancel->bank_idx         = bank->idx;
     }
 

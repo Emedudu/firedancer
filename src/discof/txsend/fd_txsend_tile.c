@@ -37,7 +37,7 @@ fd_quic_limits_t quic_limits = {
 #define MAP_PREV               map.prev
 #define MAP_NEXT               map.next
 #define MAP_KEY_EQ(k0,k1)      fd_pubkey_eq( k0, k1 )
-#define MAP_KEY_HASH(key,seed) (seed^fd_ulong_load_8( (key)->uc ))
+#define MAP_KEY_HASH(key,seed) fd_funk_rec_key_hash1( (key)->uc, (seed) )
 #define MAP_IMPL_STYLE         2
 #include "../../util/tmpl/fd_map_chain.c"
 
@@ -109,6 +109,7 @@ metrics_write( fd_txsend_tile_t * ctx ) {
   FD_MCNT_ENUM_COPY(   TXSEND, PKT_CRYPTO_FAILED,           ctx->quic->metrics.pkt_decrypt_fail_cnt    );
   FD_MCNT_ENUM_COPY(   TXSEND, PKT_NO_KEY,                  ctx->quic->metrics.pkt_no_key_cnt          );
   FD_MCNT_ENUM_COPY(   TXSEND, PKT_NO_CONN,                 ctx->quic->metrics.pkt_no_conn_cnt         );
+  FD_MCNT_SET(         TXSEND, PKT_WRONG_SRC,               ctx->quic->metrics.pkt_wrong_src_cnt       );
   FD_MCNT_ENUM_COPY(   TXSEND, FRAME_TX_ALLOC,              ctx->quic->metrics.frame_tx_alloc_cnt      );
   FD_MCNT_SET(         TXSEND, PKT_NET_HEADER_INVALID,      ctx->quic->metrics.pkt_net_hdr_err_cnt     );
   FD_MCNT_SET(         TXSEND, PKT_QUIC_HEADER_INVALID,     ctx->quic->metrics.pkt_quic_hdr_err_cnt    );
@@ -691,9 +692,8 @@ unprivileged_init( fd_topo_t *      topo,
                                                                     FD_MHIST_SECONDS_MAX( TXSEND, RECEIVE_DURATION_SECONDS ) ) );
 
   ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, scratch_align() );
-  if( FD_UNLIKELY( scratch_top != (ulong)scratch + scratch_footprint( tile ) ) ) {
+  if( FD_UNLIKELY( scratch_top > (ulong)scratch + scratch_footprint( tile ) ) )
     FD_LOG_ERR(( "scratch overflow %lu %lu %lu", scratch_top - (ulong)scratch - scratch_footprint( tile ), scratch_top, (ulong)scratch + scratch_footprint( tile ) ));
-  }
 
   fd_sleep_until_replay_started( topo );
 }

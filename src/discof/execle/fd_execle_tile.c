@@ -664,7 +664,7 @@ unprivileged_init( fd_topo_t *      topo,
   NONNULL( fd_pack_rebate_sum_join( fd_pack_rebate_sum_new( ctx->rebater ) ) );
   ctx->rebates_for_slot  = 0UL;
 
-  fd_accdb_init_from_topo( ctx->accdb, topo, tile, tile->execle.accdb_max_depth );
+  fd_accdb_init_from_topo( ctx->accdb, topo, tile->execle.accdb_max_depth );
 
   fd_progcache_init_from_topo( ctx->progcache, topo, pc_scratch, FD_PROGCACHE_SCRATCH_FOOTPRINT );
 
@@ -690,6 +690,7 @@ unprivileged_init( fd_topo_t *      topo,
   memset( &ctx->runtime->log, 0, sizeof(ctx->runtime->log) );
   ctx->runtime->log.log_collector        = ctx->log_collector;
   ctx->runtime->fuzz.enabled             = 0;
+  ctx->runtime->fuzz.reclaim_accounts    = 0;
   ctx->runtime->accounts.executable_cnt  = 0UL;
 
   ulong banks_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "banks" );

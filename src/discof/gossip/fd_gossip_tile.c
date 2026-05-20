@@ -392,7 +392,7 @@ returnable_frag( fd_gossip_tile_ctx_t * ctx,
       ctx->wfs_peers.total  = 0UL;
       memset( ctx->wfs_active, 0, sizeof(ctx->wfs_active) );
 
-      FD_TEST( manifest->vote_accounts_len<=40200UL );
+      FD_TEST( manifest->vote_accounts_len<=FD_VOTE_ACCOUNTS_MAX );
       for( ulong i=0UL; i<manifest->vote_accounts_len; i++ ) {
           if( FD_UNLIKELY( manifest->vote_accounts[ i ].stake==0UL ) ) continue;
           ctx->wfs_stake.total += manifest->vote_accounts[ i ].stake;
@@ -596,7 +596,7 @@ unprivileged_init( fd_topo_t *      topo,
 
   fd_ip4_udp_hdr_init( ctx->net_out_hdr, FD_GOSSIP_MTU, tile->gossip.ip_addr, tile->gossip.ports.gossip );
 
-  ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, 1UL );
+  ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, scratch_align() );
   if( FD_UNLIKELY( scratch_top > (ulong)scratch + scratch_footprint( tile ) ) )
     FD_LOG_ERR(( "scratch overflow %lu %lu %lu", scratch_top - (ulong)scratch - scratch_footprint( tile ), scratch_top, (ulong)scratch + scratch_footprint( tile ) ));
 }
