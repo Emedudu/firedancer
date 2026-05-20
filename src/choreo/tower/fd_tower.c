@@ -1119,7 +1119,7 @@ fd_tower_from_vote_acc( fd_tower_vote_t * votes,
                         uchar  const    * vote_acc ) {
   fd_vote_acc_t const * voter = (fd_vote_acc_t const *)fd_type_pun_const( vote_acc );
   uint                  kind  = fd_uint_load_4_fast( vote_acc ); /* skip node_pubkey */
-  for( ulong i=0; i<fd_vote_acc_vote_cnt( vote_acc ); i++ ) {
+  for( ulong i=0; i<fd_vote_acc_vote_cnt( vote_acc ); i++ ) {//@audit-info vote_acc could be very large, causing an out of bounds loop.
     switch( kind ) {
     case FD_VOTE_ACC_V4: fd_tower_vote_push_tail( votes, (fd_tower_vote_t){ .slot = v4_off( voter )[i].slot, .conf = v4_off( voter )[i].conf } ); break;
     case FD_VOTE_ACC_V3: fd_tower_vote_push_tail( votes, (fd_tower_vote_t){ .slot = voter->v3.votes[i].slot, .conf = voter->v3.votes[i].conf } ); break;
@@ -1135,7 +1135,7 @@ fd_tower_with_lat_from_vote_acc( fd_vote_acc_vote_t tower[ static FD_TOWER_VOTE_
                                  uchar const *      vote_acc ) {
   fd_vote_acc_t const * voter = (fd_vote_acc_t const *)fd_type_pun_const( vote_acc );
   uint               kind  = fd_uint_load_4_fast( vote_acc ); /* skip node_pubkey */
-  for( ulong i=0; i<fd_vote_acc_vote_cnt( vote_acc ); i++ ) {
+  for( ulong i=0; i<fd_vote_acc_vote_cnt( vote_acc ); i++ ) {//@audit-info vote_acc could be very large, causing an out of bounds loop.
     switch( kind ) {
     case FD_VOTE_ACC_V4: tower[ i ] = (fd_vote_acc_vote_t){ .latency = v4_off( voter )[i].latency, .slot = v4_off( voter )[i].slot, .conf = v4_off( voter )[i].conf }; break;
     case FD_VOTE_ACC_V3: tower[ i ] = (fd_vote_acc_vote_t){ .latency = voter->v3.votes[i].latency, .slot = voter->v3.votes[i].slot, .conf = voter->v3.votes[i].conf }; break;

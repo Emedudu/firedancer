@@ -1115,7 +1115,7 @@ replay_slot_completed( fd_tower_tile_t *            ctx,
 
       FD_BASE58_ENCODE_32_BYTES( slot_completed->block_id.uc, eqvoc_blk_id );
       FD_LOG_DEBUG(( "[%s] equivocation detected via eqvoc shred proof before replay. slot: %lu. block_id: %s", __func__, slot_completed->slot, eqvoc_blk_id ));
-      fd_ghost_eqvoc( ctx->ghost, &slot_completed->block_id );
+      fd_ghost_eqvoc( ctx->ghost, &slot_completed->block_id );//@audit-info what if this block_id is no the one eqvoc_query is marking as invalid?
     }
   }
 
